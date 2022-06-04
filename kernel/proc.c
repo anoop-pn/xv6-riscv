@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "limits.h"
+#include "stddef.h"
 
 struct cpu cpus[NCPU];
 
@@ -13,7 +15,9 @@ struct proc proc[NPROC];
 struct proc *initproc;
 
 int nextpid = 1;
+int nextthreadId = 1;
 struct spinlock pid_lock;
+struct spinlock threadID_lock;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
@@ -50,6 +54,7 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&wait_lock, "nextthreadId");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
@@ -86,6 +91,18 @@ myproc(void) {
 }
 
 int
+allocthreadId() {
+  int threadID;
+  
+  acquire(&threadID_lock);
+  threadID = nextthreadId;
+  nextthreadId = nextthreadId + 1;
+  release(&threadID_lock);
+
+  return threadID;
+}
+
+int
 allocpid() {
   int pid;
   
@@ -95,6 +112,42 @@ allocpid() {
   release(&pid_lock);
 
   return pid;
+}
+
+static struct proc*
+allocproc_thread(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state == UNUSED) {
+      goto found;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return 0;
+
+found:
+  p->pid = allocpid();
+  p->state = USED;
+  p->threadID = allocthreadId();
+
+  // Allocate a trapframe page.
+  if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // Set up new context to start executing at forkret,
+  // which returns to user space.
+  memset(&p->context, 0, sizeof(p->context));
+  p->context.ra = (uint64)forkret;
+  p->context.sp = p->kstack + PGSIZE;
+
+  return p;
 }
 
 // Look in the process table for an UNUSED proc.
@@ -119,7 +172,16 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
-
+  p->syscallCount = 0;
+  p->ticks = 0;
+  #ifdef STRIDE
+    p->tickets = 2500;
+    p->stride = 5000/p->tickets;
+    p->strideTotal = p->stride;
+  #endif
+  #ifdef LOTTERY
+    p->tickets = 2500;
+  #endif
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -153,16 +215,25 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->pagetable)
+  if(p->threadID !=0 && p->pagetable!=0)
+  {
+    uvmunmap(p->pagetable, TRAPFRAME - PGSIZE * (p->threadID),1,0);
+  }
+  else if(p->pagetable != 0)
+  {
     proc_freepagetable(p->pagetable, p->sz);
+  }
   p->pagetable = 0;
   p->sz = 0;
+  p->syscallCount = 0;
   p->pid = 0;
+  p->threadID = 0;
   p->parent = 0;
   p->name[0] = 0;
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->ticks = 0;
   p->state = UNUSED;
 }
 
@@ -268,6 +339,67 @@ growproc(int n)
 }
 
 // Create a new process, copying the parent.
+// Sets up child kernel stack to return as if from clone() system call.
+int
+clone(void *stack, int sSize)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  // Allocate process.
+  if((np = allocproc_thread()) == 0){
+    return -1;
+  }
+  if(stack == NULL)
+  {
+    return -1;
+  }
+
+  np->pagetable = p->pagetable;
+
+  // map the trapframe just below TRAMPOLINE, for trampoline.S.
+  if(mappages(np->pagetable, TRAPFRAME - (PGSIZE * np->threadID), PGSIZE,
+              (uint64)(np->trapframe), PTE_R | PTE_W) < 0){
+    uvmunmap(np->pagetable, TRAMPOLINE, 1, 0);
+    uvmfree(np->pagetable, 0);
+    return 0;
+  }
+
+  np->sz = p->sz;
+
+  // copy saved user registers.
+  *(np->trapframe) = *(p->trapframe);
+
+  np->trapframe->sp = (uint64) (stack + sSize);
+
+  // Cause fork to return 0 in the child.
+  np->trapframe->a0 = 0;
+
+  // increment reference counts on open file descriptors.
+  for(i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      np->ofile[i] = filedup(p->ofile[i]);
+  np->cwd = idup(p->cwd);
+
+  safestrcpy(np->name, p->name, sizeof(p->name));
+
+  pid = np->threadID;
+
+  release(&np->lock);
+
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+  np->state = RUNNABLE;
+  release(&np->lock);
+
+  return pid;
+}
+
+// Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
 fork(void)
@@ -288,6 +420,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->syscallCount = 0;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -345,11 +478,14 @@ exit(int status)
     panic("init exiting");
 
   // Close all open files.
-  for(int fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd]){
-      struct file *f = p->ofile[fd];
-      fileclose(f);
-      p->ofile[fd] = 0;
+  if(p->threadID == 0)
+  {
+    for(int fd = 0; fd < NOFILE; fd++){
+      if(p->ofile[fd]){
+        struct file *f = p->ofile[fd];
+        fileclose(f);
+        p->ofile[fd] = 0;
+      }
     }
   }
 
@@ -361,7 +497,10 @@ exit(int status)
   acquire(&wait_lock);
 
   // Give any children to init.
-  reparent(p);
+  if(p->threadID == 0)
+  {
+    reparent(p);
+  }
 
   // Parent might be sleeping in wait().
   wakeup(p->parent);
@@ -427,6 +566,16 @@ wait(uint64 addr)
   }
 }
 
+// Random number generator
+// unsigned short lfsr = 0xACE1u;
+unsigned short lfsr = 0xACE1u;
+unsigned short bit;
+unsigned short rand()
+{
+  bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
+  return lfsr = (lfsr >> 1) | (bit << 15);
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -439,27 +588,99 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-  
+  int scheduler = 0; // 0-> Default, 1-> Lottery, 2-> Stride 
+  #ifdef LOTTERY
+    scheduler=1;
+  #endif
+
+  #ifdef STRIDE
+    scheduler=2;
+  #endif
+
   c->proc = 0;
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
+    if(scheduler == 1)
+    {
+      int totalTickets = 0;
+      // Get total tickets
+      for(p = proc; p < &proc[NPROC]; p++) 
+      {
+        if(p->state == RUNNABLE) 
+        {
+          totalTickets += p->tickets;
+        }
       }
-      release(&p->lock);
+      int ticketDraw = (rand()%totalTickets)+1, totalCount=0;
+      // Pick the process based on the draw
+      for(p = proc; p < &proc[NPROC]; p++) {
+        if(p->state == RUNNABLE) 
+        {
+          totalCount += p->tickets;
+          if(totalCount >= ticketDraw)
+          {
+            acquire(&p->lock);
+            p->state = RUNNING;
+            p->ticks = p->ticks+1;
+            printf("%d,%d\n",p->pid, p->ticks);
+            c->proc = p;
+            swtch(&c->context, &p->context);
+            c->proc = 0;
+            release(&p->lock);
+            break;
+          }
+        }
+      }
+    }
+    else if(scheduler == 2)
+    {
+      int minStride=INT_MAX;
+      struct proc *sp = NULL; // structure to store the process to be scheduled
+      for(p = proc; p < &proc[NPROC]; p++) 
+      {
+        if(p->state == RUNNABLE) 
+        {
+          if(p->strideTotal<=minStride)
+          {
+            sp = p;
+            minStride = p->strideTotal;
+          }
+        }
+      }
+      if(sp!=NULL) // Schedule the process if there are any
+      {
+        acquire(&sp->lock);
+        sp->state = RUNNING;
+        sp->strideTotal = sp->strideTotal+sp->stride;
+        sp->ticks = sp->ticks+1;
+        printf("%d,%d\n",sp->pid, sp->ticks);
+        c->proc = sp;
+        swtch(&c->context, &sp->context);
+        c->proc = 0;
+        release(&sp->lock);
+      }
+    }
+    else // Default Round Robin Scheduling
+    {
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->state = RUNNING;
+          p->ticks = p->ticks+1;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+        }
+        release(&p->lock);
+      }
     }
   }
 }
@@ -623,6 +844,76 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
   } else {
     memmove(dst, (char*)src, len);
     return 0;
+  }
+}
+
+void print_hi(int n)
+{
+  printf("Hi from the Kernel space: %d\n",n);
+}
+
+int print_info(int n)
+{
+  if(n==1)
+  {
+    int processCount=0;
+    struct proc *p;
+    for(p = proc; p < &proc[NPROC]; p++)
+    {
+      if(p->state != UNUSED)
+      {
+        processCount++;
+      }
+    }
+    printf("Kernel Space: Print number of process in the system: %d\n",processCount);
+    return processCount;
+  }
+  else if(n==2)
+  {
+    int systemCalls = 0;
+    struct proc *currentProcess = myproc();
+    systemCalls = currentProcess->syscallCount-1;  // Excluding current info system call
+    printf("Kernel Space: Print count of total number of system calls made by current process so far: %d\n",systemCalls);
+    return systemCalls;
+  }
+  else if(n==3)
+  {
+    int memoryPages = 0;
+    struct proc *currentProcess = myproc();
+    memoryPages = (PGROUNDUP(currentProcess->sz))/PGSIZE;
+    printf("Kernel Space: Print number of memory pages the current process is using: %d\n",memoryPages);
+    return memoryPages;
+  }
+  return -1;
+}
+
+// Print scheduler statistics for all processes
+void sched_statistics()
+{
+  printf("SYSCALL: Implement scheduler statistics here!\n");
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
+    if(p->state != UNUSED)
+    {
+      printf("%d(%s):  tickets: %d,  ticks: %d\n",p->pid,p->name,p->tickets,p->ticks);
+    }
+  }
+}
+
+// Set tickets for the current process
+void sched_tickets(int modifiedTickets)
+{
+  printf("SYSCALL: Implement Ticket setter to set tickets to: %d\n",modifiedTickets);
+  if(modifiedTickets>0 && modifiedTickets<=5000)
+  {
+    struct proc *currentProcess = myproc();
+    currentProcess->tickets = modifiedTickets;
+    currentProcess->stride = 5000/currentProcess->tickets;
+  }
+  else
+  {
+    printf("SYSCALL: Ivalid Ticket number: %d\n",modifiedTickets);
   }
 }
 

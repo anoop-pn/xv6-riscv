@@ -104,6 +104,11 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+void            print_hi(int); //hi
+int             print_info(int); // info
+void            sched_statistics(void); // scheduler statistics
+void            sched_tickets(int);  // ticket setter for current process
+int             clone(void *, int);
 
 // swtch.S
 void            swtch(struct context*, struct context*);

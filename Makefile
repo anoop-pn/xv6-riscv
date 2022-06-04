@@ -66,9 +66,13 @@ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 &
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
 CFLAGS += -fno-pie -no-pie
+# LAB2 = STRIDE
+# CFLAGS += -D$(LAB2)
 endif
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
 CFLAGS += -fno-pie -nopie
+# LAB2 = STRIDE
+# CFLAGS += -D$(LAB2)
 endif
 
 LDFLAGS = -z max-page-size=4096
@@ -87,7 +91,7 @@ $U/initcode: $U/initcode.S
 tags: $(OBJS) _init
 	etags *.S *.c
 
-ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
+ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o $U/thread.o
 
 _%: %.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
@@ -132,6 +136,8 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_test\
+	$U/_frisbee\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
@@ -153,6 +159,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 	then echo "-gdb tcp::$(GDBPORT)"; \
 	else echo "-s -p $(GDBPORT)"; fi)
 ifndef CPUS
+# CPUS := 3
 CPUS := 3
 endif
 

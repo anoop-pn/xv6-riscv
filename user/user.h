@@ -23,6 +23,11 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int hi(int); //hi
+int info(int); //info
+int sched_statistics(void); // scheduler statistics
+int sched_tickets(int); // ticket setter
+int clone(void*, int);  // clone sys call
 
 // ulib.c
 int stat(const char*, struct stat*);

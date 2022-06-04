@@ -92,6 +92,12 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+  int syscallCount;            // syscalls count made by the process
+  int tickets;                 // Number of tickets owned by a process
+  int ticks;                   // Number of CPU ticks used by a process
+  int stride;                  // Constant derived from 5000/tickets
+  int strideTotal;             // Stride total required to schedule process
+  int threadID;
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process

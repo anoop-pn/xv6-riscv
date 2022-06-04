@@ -104,6 +104,11 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_wait(void);
 extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
+extern uint64 sys_hi(void); // hi: declaration
+extern uint64 sys_info(void); // info declaration
+extern uint64 sys_sched_statistics(void); //Scheduler statistics declaration
+extern uint64 sys_sched_tickets(void);  // Assign tickets
+extern uint64 sys_clone(void);  // clone sys call
 
 static uint64 (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -127,6 +132,11 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_hi]      sys_hi,
+[SYS_info]    sys_info, // info: syscall entry
+[SYS_sched_statistics]    sys_sched_statistics,
+[SYS_sched_tickets]    sys_sched_tickets,
+[SYS_clone]    sys_clone,
 };
 
 void
@@ -134,8 +144,14 @@ syscall(void)
 {
   int num;
   struct proc *p = myproc();
+  p->syscallCount = p->syscallCount+1;
 
   num = p->trapframe->a7;
+ // if(num==SYS_info)
+  //{
+//	p->syscallCount=p->syscallCount+1;
+	//printf("incrementing syscall: %d\n",p->syscallCount);
+ // }
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     p->trapframe->a0 = syscalls[num]();
   } else {

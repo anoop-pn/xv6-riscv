@@ -36,3 +36,13 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+# hi syscall for user
+entry("hi");
+# info syscall for user
+entry("info");
+# sched_statistics syscall for user
+entry("sched_statistics");
+# sched_tickets syscall for user
+entry("sched_tickets");
+# clone syscall for user
+entry("clone");

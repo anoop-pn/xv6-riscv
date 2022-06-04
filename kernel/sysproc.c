@@ -30,6 +30,16 @@ sys_fork(void)
 }
 
 uint64
+sys_clone(void)
+{
+  uint64 st;
+  int n;
+  argaddr(0, &st);
+  argint(1, &n);
+  return clone((void *)st, n);
+}
+
+uint64
 sys_wait(void)
 {
   uint64 p;
@@ -81,6 +91,41 @@ sys_kill(void)
   if(argint(0, &pid) < 0)
     return -1;
   return kill(pid);
+}
+
+uint64
+sys_hi(void)
+{
+  int n;
+  argint(0, &n);
+  print_hi(n);
+  return 0;
+}
+
+uint64
+sys_info(void)
+{
+  int n;
+  argint(0, &n);
+  return print_info(n);
+}
+
+// Scheduler statistics for all the process
+uint64
+sys_sched_statistics(void)
+{
+  sched_statistics();
+  return 0;
+}
+
+// Set tickets for the running process
+uint64
+sys_sched_tickets(void)
+{
+  int n;
+  argint(0, &n);
+  sched_tickets(n);
+  return 0;
 }
 
 // return how many clock tick interrupts have occurred
